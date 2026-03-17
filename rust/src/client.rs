@@ -1,10 +1,12 @@
-use crate::{LaserstreamConfig, LaserstreamError, config::CompressionEncoding as ConfigCompressionEncoding};
+use crate::{
+    config::CompressionEncoding as ConfigCompressionEncoding, LaserstreamConfig, LaserstreamError,
+};
 use async_stream::stream;
 use futures::StreamExt;
 use futures_channel::mpsc as futures_mpsc;
 use futures_util::{sink::SinkExt, Stream};
 use std::{pin::Pin, time::Duration};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 use laserstream_core_proto::tonic::{
     Status, Request, metadata::MetadataValue, transport::Endpoint, codec::CompressionEncoding,
@@ -59,9 +61,11 @@ impl Interceptor for SdkMetadataInterceptor {
 }
 
 /// Handle for managing a bidirectional streaming subscription.
-#[derive(Clone)]
+///
+/// Dropping the handle signals the background stream to shut down gracefully.
 pub struct StreamHandle {
     write_tx: mpsc::UnboundedSender<SubscribeRequest>,
+    close_tx: Option<watch::Sender<bool>>,
 }
 
 impl StreamHandle {
@@ -70,6 +74,14 @@ impl StreamHandle {
         self.write_tx
             .send(request)
             .map_err(|_| LaserstreamError::ConnectionError("Write channel closed".to_string()))
+    }
+}
+
+impl Drop for StreamHandle {
+    fn drop(&mut self) {
+        if let Some(tx) = self.close_tx.take() {
+            let _ = tx.send(true);
+        }
     }
 }
 
@@ -84,7 +96,11 @@ pub fn subscribe(
     StreamHandle,
 ) {
     let (write_tx, mut write_rx) = mpsc::unbounded_channel::<SubscribeRequest>();
-    let handle = StreamHandle { write_tx };
+    let (close_tx, mut close_rx) = watch::channel(false);
+    let handle = StreamHandle {
+        write_tx,
+        close_tx: Some(close_tx),
+    };
     let update_stream = stream! {
         let mut reconnect_attempts = 0;
         let mut tracked_slot: u64 = 0;
@@ -98,10 +114,10 @@ pub fn subscribe(
         // Keep original request for reconnection attempts
         let mut current_request = request.clone();
         let internal_slot_sub_id = format!("internal-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
-        
+
         // Get replay behavior from config
         let replay_enabled = config.replay;
-        
+
         // Add internal slot subscription only when replay is enabled
         if replay_enabled {
             current_request.slots.insert(
@@ -112,7 +128,7 @@ pub fn subscribe(
                 }
             );
         }
-        
+
         // Clear any user-provided from_slot if replay is disabled
         if !replay_enabled {
             current_request.from_slot = None;
@@ -161,6 +177,11 @@ pub fn subscribe(
 
                     loop {
                         tokio::select! {
+                            // Handle explicit close signal
+                            _ = close_rx.changed() => {
+                                return;
+                            }
+
                             // Send periodic ping
                             _ = ping_interval.tick() => {
                                 ping_id = ping_id.wrapping_add(1);
@@ -175,7 +196,7 @@ pub fn subscribe(
                                 if let Some(result) = result {
                                     match result {
                                         Ok(update) => {
-                                            
+
                                             // Handle ping/pong
                                             if matches!(&update.update_oneof, Some(UpdateOneof::Ping(_))) {
                                                 let pong_req = SubscribeRequest { ping: Some(SubscribeRequestPing { id: 1 }), ..Default::default() };
@@ -185,7 +206,7 @@ pub fn subscribe(
                                                 }
                                                 continue;
                                             }
-                                            
+
                                             // Do not forward server 'Pong' updates to consumers either
                                             if matches!(&update.update_oneof, Some(UpdateOneof::Pong(_))) {
                                                 continue;
@@ -196,7 +217,7 @@ pub fn subscribe(
                                     if replay_enabled {
                                         tracked_slot = s.slot;
                                     }
-                                    
+
                                     // Skip if this slot update is EXCLUSIVELY from our internal subscription
                                     if update.filters.len() == 1 && update.filters.contains(&internal_slot_sub_id) {
                                         continue;
@@ -207,7 +228,7 @@ pub fn subscribe(
                                             let mut clean_update = update;
                                             if replay_enabled {
                                                 clean_update.filters.retain(|f| f != &internal_slot_sub_id);
-                                                
+
                                                 // Only yield if there are still filters after cleaning
                                                 if !clean_update.filters.is_empty() {
                                                     yield Ok(clean_update);
@@ -229,7 +250,7 @@ pub fn subscribe(
                                     break;
                                 }
                             }
-                            
+
                             // Handle write requests from the user
                             Some(write_request) = write_rx.recv() => {
                                 // Merge the write_request into current_request so it persists across reconnections
@@ -270,12 +291,15 @@ pub fn subscribe(
                 }
             }
 
-            // Wait 5s before retry
+            // Wait 5s before retry, but abort if close is signalled
             let delay = Duration::from_millis(FIXED_RECONNECT_INTERVAL_MS);
-            sleep(delay).await;
+            tokio::select! {
+                _ = sleep(delay) => {}
+                _ = close_rx.changed() => { return; }
+            }
         }
     };
-    
+
     (update_stream, handle)
 }
 
