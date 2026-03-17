@@ -1,13 +1,14 @@
-use crate::{LaserstreamConfig, LaserstreamError, config::CompressionEncoding as ConfigCompressionEncoding};
+use crate::{
+    config::CompressionEncoding as ConfigCompressionEncoding, LaserstreamConfig, LaserstreamError,
+};
 use async_stream::stream;
 use futures::{StreamExt, TryStreamExt};
 use futures_channel::mpsc as futures_mpsc;
 use futures_util::{sink::SinkExt, Stream};
 use std::{pin::Pin, time::Duration};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 use tonic::Status;
-use yellowstone_grpc_proto::tonic::codec::CompressionEncoding;
 use tracing::{error, instrument, warn};
 use uuid;
 use yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcClient};
@@ -15,14 +16,17 @@ use yellowstone_grpc_proto::geyser::{
     subscribe_update::UpdateOneof, SubscribeRequest, SubscribeRequestFilterSlots,
     SubscribeRequestPing, SubscribeUpdate,
 };
+use yellowstone_grpc_proto::tonic::codec::CompressionEncoding;
 
 const HARD_CAP_RECONNECT_ATTEMPTS: u32 = (20 * 60) / 5; // 20 mins / 5 sec interval
 const FIXED_RECONNECT_INTERVAL_MS: u64 = 5000; // 5 seconds fixed interval
 
 /// Handle for managing a bidirectional streaming subscription.
-#[derive(Clone)]
+///
+/// Dropping the handle signals the background stream to shut down gracefully.
 pub struct StreamHandle {
     write_tx: mpsc::UnboundedSender<SubscribeRequest>,
+    close_tx: Option<watch::Sender<bool>>,
 }
 
 impl StreamHandle {
@@ -31,6 +35,14 @@ impl StreamHandle {
         self.write_tx
             .send(request)
             .map_err(|_| LaserstreamError::ConnectionError("Write channel closed".to_string()))
+    }
+}
+
+impl Drop for StreamHandle {
+    fn drop(&mut self) {
+        if let Some(tx) = self.close_tx.take() {
+            let _ = tx.send(true);
+        }
     }
 }
 
@@ -45,7 +57,11 @@ pub fn subscribe(
     StreamHandle,
 ) {
     let (write_tx, mut write_rx) = mpsc::unbounded_channel::<SubscribeRequest>();
-    let handle = StreamHandle { write_tx };
+    let (close_tx, mut close_rx) = watch::channel(false);
+    let handle = StreamHandle {
+        write_tx,
+        close_tx: Some(close_tx),
+    };
     let update_stream = stream! {
         let mut reconnect_attempts = 0;
         let mut tracked_slot: u64 = 0;
@@ -59,10 +75,10 @@ pub fn subscribe(
         // Keep original request for reconnection attempts
         let mut current_request = request.clone();
         let internal_slot_sub_id = format!("internal-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
-        
+
         // Get replay behavior from config
         let replay_enabled = config.replay;
-        
+
         // Add internal slot subscription only when replay is enabled
         if replay_enabled {
             current_request.slots.insert(
@@ -73,13 +89,13 @@ pub fn subscribe(
                 }
             );
         }
-        
+
         // Clear any user-provided from_slot if replay is disabled
         if !replay_enabled {
             current_request.from_slot = None;
         }
 
-        let api_key_string = config.api_key.clone(); 
+        let api_key_string = config.api_key.clone();
 
         loop {
 
@@ -94,7 +110,7 @@ pub fn subscribe(
                     1 | 2 => tracked_slot,                 // CONFIRMED/FINALIZED: exact slot
                     _ => tracked_slot.saturating_sub(31),  // Unknown: default to safe behavior
                     };
-                    
+
                 attempt_request.from_slot = Some(from_slot);
             } else if !replay_enabled {
                 // Ensure from_slot is always None when replay is disabled
@@ -123,6 +139,11 @@ pub fn subscribe(
 
                     loop {
                         tokio::select! {
+                            // Handle explicit close signal
+                            _ = close_rx.changed() => {
+                                return;
+                            }
+
                             // Send periodic ping
                             _ = ping_interval.tick() => {
                                 ping_id = ping_id.wrapping_add(1);
@@ -137,7 +158,7 @@ pub fn subscribe(
                                 if let Some(result) = result {
                                     match result {
                                         Ok(update) => {
-                                            
+
                                             // Handle ping/pong
                                             if matches!(&update.update_oneof, Some(UpdateOneof::Ping(_))) {
                                                 let pong_req = SubscribeRequest { ping: Some(SubscribeRequestPing { id: 1 }), ..Default::default() };
@@ -147,7 +168,7 @@ pub fn subscribe(
                                                 }
                                                 continue;
                                             }
-                                            
+
                                             // Do not forward server 'Pong' updates to consumers either
                                             if matches!(&update.update_oneof, Some(UpdateOneof::Pong(_))) {
                                                 continue;
@@ -158,7 +179,7 @@ pub fn subscribe(
                                     if replay_enabled {
                                         tracked_slot = s.slot;
                                     }
-                                    
+
                                     // Skip if this slot update is EXCLUSIVELY from our internal subscription
                                     if update.filters.len() == 1 && update.filters.contains(&internal_slot_sub_id) {
                                         continue;
@@ -169,7 +190,7 @@ pub fn subscribe(
                                             let mut clean_update = update;
                                             if replay_enabled {
                                                 clean_update.filters.retain(|f| f != &internal_slot_sub_id);
-                                                
+
                                                 // Only yield if there are still filters after cleaning
                                                 if !clean_update.filters.is_empty() {
                                                     yield Ok(clean_update);
@@ -191,7 +212,7 @@ pub fn subscribe(
                                     break;
                                 }
                             }
-                            
+
                             // Handle write requests from the user
                             Some(write_request) = write_rx.recv() => {
                                 if let Err(e) = sender.send(write_request).await {
@@ -218,12 +239,15 @@ pub fn subscribe(
                 return;
             }
 
-            // Wait 5s before retry
+            // Wait 5s before retry, but abort if close is signalled
             let delay = Duration::from_millis(FIXED_RECONNECT_INTERVAL_MS);
-            sleep(delay).await;
+            tokio::select! {
+                _ = sleep(delay) => {}
+                _ = close_rx.changed() => { return; }
+            }
         }
     };
-    
+
     (update_stream, handle)
 }
 
@@ -240,27 +264,37 @@ async fn connect_and_subscribe_once(
     tonic::Status,
 > {
     let options = &config.channel_options;
-    
+
     let mut builder = GeyserGrpcClient::build_from_shared(config.endpoint.clone())
         .map_err(|e| tonic::Status::internal(format!("Failed to build client: {}", e)))?
         .x_token(Some(api_key))
         .map_err(|e| tonic::Status::unauthenticated(format!("Failed to set API key: {}", e)))?
-        .connect_timeout(Duration::from_secs(options.connect_timeout_secs.unwrap_or(10)))
+        .connect_timeout(Duration::from_secs(
+            options.connect_timeout_secs.unwrap_or(10),
+        ))
         .timeout(Duration::from_secs(options.timeout_secs.unwrap_or(30)))
         .max_decoding_message_size(options.max_decoding_message_size.unwrap_or(1_000_000_000)) // 1GB default
-        .max_encoding_message_size(options.max_encoding_message_size.unwrap_or(32_000_000))    // 32MB default
-        .http2_keep_alive_interval(Duration::from_secs(options.http2_keep_alive_interval_secs.unwrap_or(30)))
-        .keep_alive_timeout(Duration::from_secs(options.keep_alive_timeout_secs.unwrap_or(5)))  
+        .max_encoding_message_size(options.max_encoding_message_size.unwrap_or(32_000_000)) // 32MB default
+        .http2_keep_alive_interval(Duration::from_secs(
+            options.http2_keep_alive_interval_secs.unwrap_or(30),
+        ))
+        .keep_alive_timeout(Duration::from_secs(
+            options.keep_alive_timeout_secs.unwrap_or(5),
+        ))
         .keep_alive_while_idle(options.keep_alive_while_idle.unwrap_or(true))
-        .initial_stream_window_size(options.initial_stream_window_size.or(Some(1024 * 1024 * 4)))      // 4MB default
-        .initial_connection_window_size(options.initial_connection_window_size.or(Some(1024 * 1024 * 8)))  // 8MB default
-        .http2_adaptive_window(options.http2_adaptive_window.unwrap_or(true))                             // Dynamic window sizing
-        .tcp_nodelay(options.tcp_nodelay.unwrap_or(true))                                       // Disable Nagle's algorithm
-        .tcp_keepalive(options.tcp_keepalive_secs.map(Duration::from_secs))           // TCP keepalive
-        .buffer_size(options.buffer_size.or(Some(1024 * 64)))                           // 64KB default
+        .initial_stream_window_size(options.initial_stream_window_size.or(Some(1024 * 1024 * 4))) // 4MB default
+        .initial_connection_window_size(
+            options
+                .initial_connection_window_size
+                .or(Some(1024 * 1024 * 8)),
+        ) // 8MB default
+        .http2_adaptive_window(options.http2_adaptive_window.unwrap_or(true)) // Dynamic window sizing
+        .tcp_nodelay(options.tcp_nodelay.unwrap_or(true)) // Disable Nagle's algorithm
+        .tcp_keepalive(options.tcp_keepalive_secs.map(Duration::from_secs)) // TCP keepalive
+        .buffer_size(options.buffer_size.or(Some(1024 * 64))) // 64KB default
         .tls_config(ClientTlsConfig::new().with_enabled_roots())
         .map_err(|e| tonic::Status::internal(format!("TLS config error: {}", e)))?;
-    
+
     // Configure compression if specified
     if let Some(send_comp) = options.send_compression {
         let encoding = match send_comp {
@@ -269,7 +303,7 @@ async fn connect_and_subscribe_once(
         };
         builder = builder.send_compressed(encoding);
     }
-    
+
     // Configure accepted compression encodings
     if let Some(ref accept_comps) = options.accept_compression {
         for comp in accept_comps {
@@ -285,7 +319,7 @@ async fn connect_and_subscribe_once(
             .accept_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Zstd);
     }
-    
+
     let mut builder = builder
         .connect()
         .await
