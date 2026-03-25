@@ -4,7 +4,7 @@ use futures::StreamExt;
 use futures_channel::mpsc as futures_mpsc;
 use futures_util::{sink::SinkExt, Stream};
 use std::{pin::Pin, time::Duration};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 use laserstream_core_proto::tonic::{
     Status, Request, metadata::MetadataValue, transport::Endpoint, codec::CompressionEncoding,
@@ -34,7 +34,7 @@ impl SdkMetadataInterceptor {
     fn new(api_key: String) -> Result<Self, Status> {
         let x_token = if !api_key.is_empty() {
             Some(api_key.parse().map_err(|e| {
-                Status::invalid_argument(format!("Invalid API key: {}", e))
+                Status::invalid_argument(format!("Invalid API key: {e}"))
             })?)
         } else {
             None
@@ -59,9 +59,11 @@ impl Interceptor for SdkMetadataInterceptor {
 }
 
 /// Handle for managing a bidirectional streaming subscription.
-#[derive(Clone)]
+///
+/// Dropping the handle signals the background stream to shut down gracefully.
 pub struct StreamHandle {
     write_tx: mpsc::UnboundedSender<SubscribeRequest>,
+    close_tx: Option<watch::Sender<bool>>,
 }
 
 impl StreamHandle {
@@ -70,6 +72,14 @@ impl StreamHandle {
         self.write_tx
             .send(request)
             .map_err(|_| LaserstreamError::ConnectionError("Write channel closed".to_string()))
+    }
+}
+
+impl Drop for StreamHandle {
+    fn drop(&mut self) {
+        if let Some(tx) = self.close_tx.take() {
+            let _ = tx.send(true);
+        }
     }
 }
 
@@ -84,7 +94,11 @@ pub fn subscribe(
     StreamHandle,
 ) {
     let (write_tx, mut write_rx) = mpsc::unbounded_channel::<SubscribeRequest>();
-    let handle = StreamHandle { write_tx };
+    let (close_tx, mut close_rx) = watch::channel(false);
+    let handle = StreamHandle {
+        write_tx,
+        close_tx: Some(close_tx),
+    };
     let update_stream = stream! {
         let mut reconnect_attempts = 0;
         let mut tracked_slot: u64 = 0;
@@ -161,6 +175,11 @@ pub fn subscribe(
 
                     loop {
                         tokio::select! {
+                            // Handle explicit close signal
+                            _ = close_rx.changed() => {
+                                return;
+                            }
+
                             // Send periodic ping
                             _ = ping_interval.tick() => {
                                 ping_id = ping_id.wrapping_add(1);
@@ -255,16 +274,19 @@ pub fn subscribe(
                         error!(attempts = effective_max_attempts, "Max reconnection attempts reached");
                         // Only report error to consumer after exhausting all retries
                         yield Err(LaserstreamError::MaxReconnectAttempts(Status::cancelled(
-                            format!("Connection failed after {} attempts", effective_max_attempts)
+                            format!("Connection failed after {effective_max_attempts} attempts")
                         )));
                         return;
                     }
                 }
             }
 
-            // Wait 5s before retry
+            // Wait 5s before retry, but abort if close is signalled
             let delay = Duration::from_millis(FIXED_RECONNECT_INTERVAL_MS);
-            sleep(delay).await;
+            tokio::select! {
+                _ = sleep(delay) => {}
+                _ = close_rx.changed() => { return; }
+            }
         }
     };
     
@@ -290,7 +312,7 @@ async fn connect_and_subscribe_once(
 
     // Build endpoint with all options
     let mut endpoint = Endpoint::from_shared(config.endpoint.clone())
-        .map_err(|e| Status::internal(format!("Failed to parse endpoint: {}", e)))?
+        .map_err(|e| Status::internal(format!("Failed to parse endpoint: {e}")))?
         .connect_timeout(Duration::from_secs(options.connect_timeout_secs.unwrap_or(10)))
         .timeout(Duration::from_secs(options.timeout_secs.unwrap_or(30)))
         .http2_keep_alive_interval(Duration::from_secs(options.http2_keep_alive_interval_secs.unwrap_or(30)))
@@ -309,13 +331,13 @@ async fn connect_and_subscribe_once(
     // Configure TLS
     endpoint = endpoint
         .tls_config(ClientTlsConfig::new().with_enabled_roots())
-        .map_err(|e| Status::internal(format!("TLS config error: {}", e)))?;
+        .map_err(|e| Status::internal(format!("TLS config error: {e}")))?;
 
     // Connect to create channel
     let channel = endpoint
         .connect()
         .await
-        .map_err(|e| Status::unavailable(format!("Connection failed: {}", e)))?;
+        .map_err(|e| Status::unavailable(format!("Connection failed: {e}")))?;
 
     // Create geyser client with our custom interceptor
     let mut geyser_client = GeyserClient::with_interceptor(channel, interceptor);
@@ -350,12 +372,12 @@ async fn connect_and_subscribe_once(
     subscribe_tx
         .send(request)
         .await
-        .map_err(|e| Status::internal(format!("Failed to send initial request: {}", e)))?;
+        .map_err(|e| Status::internal(format!("Failed to send initial request: {e}")))?;
 
     let response = geyser_client
         .subscribe(subscribe_rx)
         .await
-        .map_err(|e| Status::internal(format!("Subscription failed: {}", e)))?;
+        .map_err(|e| Status::internal(format!("Subscription failed: {e}")))?;
 
     Ok((subscribe_tx, response.into_inner()))
 }
@@ -409,7 +431,7 @@ pub fn subscribe_preprocessed(
                     if reconnect_attempts >= effective_max_attempts {
                         error!(attempts = effective_max_attempts, "Max reconnection attempts reached");
                         yield Err(LaserstreamError::MaxReconnectAttempts(Status::cancelled(
-                            format!("Connection failed after {} attempts", effective_max_attempts)
+                            format!("Connection failed after {effective_max_attempts} attempts")
                         )));
                         return;
                     }
@@ -440,7 +462,7 @@ async fn connect_and_subscribe_preprocessed_once(
 
     // Build endpoint with all options
     let mut endpoint = Endpoint::from_shared(config.endpoint.clone())
-        .map_err(|e| Status::internal(format!("Failed to parse endpoint: {}", e)))?
+        .map_err(|e| Status::internal(format!("Failed to parse endpoint: {e}")))?
         .connect_timeout(Duration::from_secs(options.connect_timeout_secs.unwrap_or(10)))
         .timeout(Duration::from_secs(options.timeout_secs.unwrap_or(30)))
         .tcp_nodelay(options.tcp_nodelay.unwrap_or(true))
@@ -451,12 +473,12 @@ async fn connect_and_subscribe_preprocessed_once(
 
     endpoint = endpoint
         .tls_config(ClientTlsConfig::new().with_enabled_roots())
-        .map_err(|e| Status::internal(format!("Failed to configure TLS: {}", e)))?;
+        .map_err(|e| Status::internal(format!("Failed to configure TLS: {e}")))?;
 
     let channel = endpoint
         .connect()
         .await
-        .map_err(|e| Status::internal(format!("Failed to connect: {}", e)))?;
+        .map_err(|e| Status::internal(format!("Failed to connect: {e}")))?;
 
     let mut geyser_client = GeyserClient::with_interceptor(channel, interceptor)
         .max_decoding_message_size(options.max_decoding_message_size.unwrap_or(1_000_000_000))
@@ -476,12 +498,12 @@ async fn connect_and_subscribe_preprocessed_once(
     subscribe_tx
         .send(request)
         .await
-        .map_err(|e| Status::internal(format!("Failed to send initial request: {}", e)))?;
+        .map_err(|e| Status::internal(format!("Failed to send initial request: {e}")))?;
 
     let response = geyser_client
         .subscribe_preprocessed(subscribe_rx)
         .await
-        .map_err(|e| Status::internal(format!("Preprocessed subscription failed: {}", e)))?;
+        .map_err(|e| Status::internal(format!("Preprocessed subscription failed: {e}")))?;
 
     Ok(response.into_inner())
 }

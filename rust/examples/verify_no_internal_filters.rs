@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Error: {:?}", e);
+                        eprintln!("Error: {e:?}");
                         break;
                     }
                 }
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match timeout {
         Ok(_) => {
             if count > 0 {
-                println!("WARNING: Received {} updates when none were expected!", count);
+                println!("WARNING: Received {count} updates when none were expected!");
             }
         }
         Err(_) => {
@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Some(Err(e)) => {
-                eprintln!("Stream error: {:?}", e);
+                eprintln!("Stream error: {e:?}");
                 break;
             }
             None => {
@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     
-    println!("\n✓ Successfully verified {} slot updates contain no internal filters", verified_count);
+    println!("\n✓ Successfully verified {verified_count} slot updates contain no internal filters");
     
     Ok(())
 }

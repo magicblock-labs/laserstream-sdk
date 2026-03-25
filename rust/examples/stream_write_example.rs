@@ -46,7 +46,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = Box::pin(stream);
 
     let message_count = Arc::new(AtomicU32::new(0));
-    let handle_clone = handle.clone();
     let count_clone = message_count.clone();
 
     // Spawn a task to add subscriptions dynamically
@@ -73,8 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         };
 
-        if let Err(e) = handle_clone.write(transaction_request).await {
-            eprintln!("❌ Failed to add transaction subscription: {}", e);
+        if let Err(e) = handle.write(transaction_request).await {
+            eprintln!("❌ Failed to add transaction subscription: {e}");
         } else {
             println!("✅ Successfully added transaction subscription");
         }
@@ -102,8 +101,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         };
 
-        if let Err(e) = handle_clone.write(block_request).await {
-            eprintln!("❌ Failed to add block subscription: {}", e);
+        if let Err(e) = handle.write(block_request).await {
+            eprintln!("❌ Failed to add block subscription: {e}");
         } else {
             println!("✅ Successfully added block subscription");
         }
@@ -138,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(e) => {
-                eprintln!("❌ Stream error: {}", e);
+                eprintln!("❌ Stream error: {e}");
                 // The stream will automatically reconnect
             }
         }
