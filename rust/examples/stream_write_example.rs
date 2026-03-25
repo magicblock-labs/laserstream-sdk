@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         if let Err(e) = handle.write(transaction_request).await {
-            eprintln!("❌ Failed to add transaction subscription: {}", e);
+            eprintln!("❌ Failed to add transaction subscription: {e}");
         } else {
             println!("✅ Successfully added transaction subscription");
         }
@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         if let Err(e) = handle.write(block_request).await {
-            eprintln!("❌ Failed to add block subscription: {}", e);
+            eprintln!("❌ Failed to add block subscription: {e}");
         } else {
             println!("✅ Successfully added block subscription");
         }
@@ -137,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(e) => {
-                eprintln!("❌ Stream error: {}", e);
+                eprintln!("❌ Stream error: {e}");
                 // The stream will automatically reconnect
             }
         }

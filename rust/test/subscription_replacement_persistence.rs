@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| std::env::var("LASERSTREAM_PRODUCTION_API_KEY"))
         .unwrap_or_default();
 
-    println!("Connecting through chaos proxy at {}", endpoint);
+    println!("Connecting through chaos proxy at {endpoint}");
 
     let config = LaserstreamConfig::new(endpoint, api_key);
 
@@ -130,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("[writer] write() sent successfully");
             }
             Err(e) => {
-                eprintln!("FATAL: Failed to write: {}", e);
+                eprintln!("FATAL: Failed to write: {e}");
                 std::process::exit(1);
             }
         }
@@ -142,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Early exit: Phase 3 has enough messages
         let p3_total = usdc_phase3.load(Ordering::Relaxed) + usdt_phase3.load(Ordering::Relaxed);
         if p3_total >= MIN_PHASE3_MSGS {
-            println!("[early exit] Phase 3 collected {} messages", p3_total);
+            println!("[early exit] Phase 3 collected {p3_total} messages");
             break;
         }
 
@@ -191,9 +191,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let n = reconnects_after_write.fetch_add(1, Ordering::SeqCst) + 1;
                             reconnected_after_write.store(true, Ordering::SeqCst);
                             *reconnect_after_write_time.lock().await = Some(Instant::now());
-                            eprintln!("[reconnect #{}] (after write, #{} post-write) {}", recon_num, n, e);
+                            eprintln!("[reconnect #{recon_num}] (after write, #{n} post-write) {e}");
                         } else {
-                            eprintln!("[reconnect #{}] (before write) {}", recon_num, e);
+                            eprintln!("[reconnect #{recon_num}] (before write) {e}");
                         }
                     }
                 }
@@ -215,9 +215,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let p3_usdt = usdt_phase3.load(Ordering::Relaxed);
 
     println!("\n--- Results ---");
-    println!("Phase 1 (before write):                USDC={:<6} USDT={}", p1_usdc, p1_usdt);
-    println!("Phase 2 (after write, pre-reconnect):  USDC={:<6} USDT={}", p2_usdc, p2_usdt);
-    println!("Phase 3 (after reconnect post-write):  USDC={:<6} USDT={}", p3_usdc, p3_usdt);
+    println!("Phase 1 (before write):                USDC={p1_usdc:<6} USDT={p1_usdt}");
+    println!("Phase 2 (after write, pre-reconnect):  USDC={p2_usdc:<6} USDT={p2_usdt}");
+    println!("Phase 3 (after reconnect post-write):  USDC={p3_usdc:<6} USDT={p3_usdt}");
     println!("Total reconnections: {} (before write: {}, after write: {})",
         total_recon, total_recon - post_write_recon, post_write_recon);
 
@@ -225,15 +225,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut failed = false;
 
     if p1_usdc < MIN_PHASE1_MSGS {
-        eprintln!("FAIL: Phase 1 — USDC got {} txns before write (expected >= {})", p1_usdc, MIN_PHASE1_MSGS);
+        eprintln!("FAIL: Phase 1 — USDC got {p1_usdc} txns before write (expected >= {MIN_PHASE1_MSGS})");
         failed = true;
     }
     if p1_usdt > 0 {
-        eprintln!("FAIL: Phase 1 — USDT got {} txns before write (expected 0)", p1_usdt);
+        eprintln!("FAIL: Phase 1 — USDT got {p1_usdt} txns before write (expected 0)");
         failed = true;
     }
     if p2_usdc > 0 {
-        eprintln!("FAIL: Phase 2 — USDC got {} txns after write (expected 0)", p2_usdc);
+        eprintln!("FAIL: Phase 2 — USDC got {p2_usdc} txns after write (expected 0)");
         failed = true;
     }
     if p2_usdt == 0 && !did_reconnect_after_write {
@@ -245,11 +245,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         failed = true;
     }
     if p3_usdc > 0 {
-        eprintln!("FAIL: Phase 3 — USDC got {} txns after reconnect (write NOT persisted!)", p3_usdc);
+        eprintln!("FAIL: Phase 3 — USDC got {p3_usdc} txns after reconnect (write NOT persisted!)");
         failed = true;
     }
     if did_reconnect_after_write && p3_usdt < MIN_PHASE3_MSGS {
-        eprintln!("FAIL: Phase 3 — USDT got {} txns after reconnect (expected >= {})", p3_usdt, MIN_PHASE3_MSGS);
+        eprintln!("FAIL: Phase 3 — USDT got {p3_usdt} txns after reconnect (expected >= {MIN_PHASE3_MSGS})");
         failed = true;
     }
 
@@ -258,7 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    println!("\nAll assertions passed — write() persisted across {} post-write reconnection(s)", post_write_recon);
+    println!("\nAll assertions passed — write() persisted across {post_write_recon} post-write reconnection(s)");
     Ok(())
 }
 

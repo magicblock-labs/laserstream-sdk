@@ -11,7 +11,6 @@ use helius_laserstream::{
     subscribe, LaserstreamConfig,
 };
 use laserstream_core_client::{ClientTlsConfig, GeyserGrpcClient};
-use bs58;
 use tracing::{error, warn};
 use std::io::{self, Write};
 use sha2::{Sha256, Digest};
@@ -20,9 +19,9 @@ use sha2::{Sha256, Digest};
 fn fingerprint_account(data: &[u8], lamports: u64) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    hasher.update(&lamports.to_le_bytes());
+    hasher.update(lamports.to_le_bytes());
     let digest = hasher.finalize();
-    format!("{:x}", digest)
+    format!("{digest:x}")
 }
 
 #[tokio::main]
@@ -110,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let fp = fingerprint_account(&account_msg.data, account_msg.lamports);
                                     map.insert(key_b58_copy, fp);
                                 }
-                                println!("[LS] key={} slot={}", key_b58, slot);
+                                println!("[LS] key={key_b58} slot={slot}");
                                 io::stdout().flush().ok();
                             }
                         }
@@ -165,7 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let fp = fingerprint_account(&account_msg.data, account_msg.lamports);
                                     map.insert(key_b58_copy, fp);
                                 }
-                                println!("[YS] key={} slot={}", key_b58, slot);
+                                println!("[YS] key={key_b58} slot={slot}");
                                 io::stdout().flush().ok();
                             }
                         }

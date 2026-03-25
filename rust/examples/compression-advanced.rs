@@ -14,21 +14,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Endpoint not set");
 
     // Example 1: Manual compression configuration
-    let mut channel_options = ChannelOptions::default();
-    
-    // Send using zstd compression
-    channel_options.send_compression = Some(CompressionEncoding::Zstd);
-    
-    // Accept both compression types (order matters - first is preferred)
-    channel_options.accept_compression = Some(vec![
-        CompressionEncoding::Zstd,  // Prefer zstd
-        CompressionEncoding::Gzip,  // Fallback to gzip
-    ]);
-    
-    // Other performance options
-    channel_options.max_decoding_message_size = Some(2_000_000_000); // 2GB
-    channel_options.http2_keep_alive_interval_secs = Some(20);
-    channel_options.tcp_nodelay = Some(true);
+    let channel_options = ChannelOptions {
+        send_compression: Some(CompressionEncoding::Zstd),
+        accept_compression: Some(vec![
+            CompressionEncoding::Zstd,  // Prefer zstd
+            CompressionEncoding::Gzip,  // Fallback to gzip
+        ]),
+        max_decoding_message_size: Some(2_000_000_000), // 2GB
+        http2_keep_alive_interval_secs: Some(20),
+        tcp_nodelay: Some(true),
+        ..Default::default()
+    };
 
     let config = LaserstreamConfig::new(endpoint.clone(), api_key.clone())
         .with_channel_options(channel_options);
@@ -56,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(e) => {
-                eprintln!("Error: {:?}", e);
+                eprintln!("Error: {e:?}");
                 break;
             }
         }
@@ -87,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(e) => {
-                eprintln!("Error: {:?}", e);
+                eprintln!("Error: {e:?}");
                 break;
             }
         }

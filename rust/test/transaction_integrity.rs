@@ -10,7 +10,6 @@ use helius_laserstream::{
 use laserstream_core_client::{ClientTlsConfig, GeyserGrpcClient};
 use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
-use bs58;
 use std::io::{self, Write};
 
 #[tokio::main]
@@ -56,7 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_slot_ys = Arc::new(Mutex::new(0u64));
 
     // For display and match when both slots known
-    let status_map: Arc<Mutex<HashMap<String, (Option<u64>, Option<u64>)>>> = Arc::new(Mutex::new(HashMap::new()));
+    type StatusMap = HashMap<String, (Option<u64>, Option<u64>)>;
+    let status_map: Arc<Mutex<StatusMap>> = Arc::new(Mutex::new(HashMap::new()));
 
     // Counters for periodic report
     let new_ls = Arc::new(Mutex::new(0u64));
@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if entry.0.is_some() && entry.1.is_some() {
                                         info!("MATCH {}  LS_slot={}  YS_slot={}", sig_str, slot, entry.1.unwrap());
                                         st.remove(&sig_str);
-                                        println!("[LS] sig={} slot={}", sig_str, slot);
+                                        println!("[LS] sig={sig_str} slot={slot}");
                                         io::stdout().flush().ok();
                                     }
                                 }
@@ -165,7 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if entry.0.is_some() && entry.1.is_some() {
                                         info!("MATCH {}  LS_slot={}  YS_slot={}", sig_str, entry.0.unwrap(), slot);
                                         st.remove(&sig_str);
-                                        println!("[YS] sig={} slot={}", sig_str, slot);
+                                        println!("[YS] sig={sig_str} slot={slot}");
                                         io::stdout().flush().ok();
                                     }
                                 }
@@ -236,7 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let err_l = *err_ls.lock().await;
                 let err_y = *err_ys.lock().await;
 
-                println!("[{}] laserstream+{} yellowstone+{} processedSlots:{} missingLS:{} missingYS:{} LS_errors:{} YS_errors:{}", now, ls_new, ys_new, processed_slots, total_missing_ls, total_missing_ys, err_l, err_y);
+                println!("[{now}] laserstream+{ls_new} yellowstone+{ys_new} processedSlots:{processed_slots} missingLS:{total_missing_ls} missingYS:{total_missing_ys} LS_errors:{err_l} YS_errors:{err_y}");
 
                 *new_ls.lock().await = 0;
                 *new_ys.lock().await = 0;
