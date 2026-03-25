@@ -89,7 +89,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (stream, handle) = subscribe(config, initial_request);
     let mut stream = Box::pin(stream);
 
-    let handle_clone = handle.clone();
     let write_time_setter = write_completed_time.clone();
     let ready_flag = ready_for_write.clone();
 
@@ -125,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         };
 
-        match handle_clone.write(write_request).await {
+        match handle.write(write_request).await {
             Ok(()) => {
                 *write_time_setter.lock().await = Some(Instant::now());
                 println!("[writer] write() sent successfully");
