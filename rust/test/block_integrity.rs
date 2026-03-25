@@ -64,13 +64,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if block_exists(&client, rpc_endpoint, &api_key_clone, missing).await? {
                                     error!("ERROR: Missed slot {} – block exists but was not received.", missing);
                                 } else {
-                                    println!("Skipped slot {} (no block produced)", missing);
+                                    println!("Skipped slot {missing} (no block produced)");
                                     io::stdout().flush().ok();
                                 }
                             }
                         }
                     }
-                    println!("Received slot: {}", current_slot);
+                    println!("Received slot: {current_slot}");
                     io::stdout().flush().ok();
                     last_slot = Some(current_slot);
                 }
@@ -100,7 +100,7 @@ async fn block_exists(client: &Client, endpoint: &str, api_key: &str, slot: u64)
         ]
     });
 
-    let resp = client.post(format!("{}?api-key={}", endpoint, api_key))
+    let resp = client.post(format!("{endpoint}?api-key={api_key}"))
         .json(&body)
         .send()
         .await?;
