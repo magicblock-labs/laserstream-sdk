@@ -48,12 +48,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(e) => {
-                eprintln!("Error: {:?}", e);
+                eprintln!("Error: {e:?}");
                 break;
             }
         }
     }
 
-    println!("Received {} compressed slot updates", count);
+    println!("Received {count} compressed slot updates");
     Ok(())
 }

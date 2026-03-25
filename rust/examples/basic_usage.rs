@@ -48,10 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(result) = stream.next().await {
         match result {
             Ok(update) => {
-                println!("{:?}", update);
+                println!("{update:?}");
             }
             Err(e) => {
-                eprintln!("Stream error: {}", e);
+                eprintln!("Stream error: {e}");
             }
         }
     }

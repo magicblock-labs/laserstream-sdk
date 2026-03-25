@@ -44,10 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match result {
             Ok(update) => {
                 // Print the raw debug output
-                println!("{:#?}", update);
+                println!("{update:#?}");
             }
             Err(e) => {
-                eprintln!("Stream error: {:?}", e);
+                eprintln!("Stream error: {e:?}");
                 break;
             }
         }

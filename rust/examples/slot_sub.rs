@@ -1,5 +1,4 @@
-use helius_laserstream::{subscribe, LaserstreamConfig};
-use yellowstone_grpc_proto::geyser::{SubscribeRequest, SubscribeRequestFilterSlots};
+use helius_laserstream::{subscribe, LaserstreamConfig, grpc::{SubscribeRequest, SubscribeRequestFilterSlots}};
 use futures::StreamExt;
 use std::env;
 
@@ -35,10 +34,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(result) = stream.next().await {
         match result {
             Ok(update) => {
-                println!("{:?}", update);
+                println!("{update:?}");
             }
             Err(e) => {
-                eprintln!("Error: {:?}", e);
+                eprintln!("Error: {e:?}");
                 break;
             }
         }
