@@ -3,7 +3,6 @@ use crate::{
 };
 use async_stream::stream;
 use futures::{StreamExt, TryStreamExt};
-use futures_channel::mpsc as futures_mpsc;
 use futures_util::{sink::SinkExt, Stream};
 use std::{pin::Pin, time::Duration};
 use tokio::sync::{mpsc, watch};
@@ -11,7 +10,9 @@ use tokio::time::sleep;
 use tonic::Status;
 use tracing::{error, instrument, warn};
 use uuid;
-use yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcClient};
+use yellowstone_grpc_client::{
+    ClientTlsConfig, GeyserGrpcClient, SubscribeRequestSinkError,
+};
 use yellowstone_grpc_proto::geyser::{
     subscribe_update::UpdateOneof, SubscribeRequest, SubscribeRequestFilterSlots,
     SubscribeRequestPing, SubscribeUpdate,
@@ -123,7 +124,7 @@ pub fn subscribe(
                     reconnect_attempts = 0;
 
                     // Box sender and stream here before processing
-                    let mut sender: Pin<Box<dyn futures_util::Sink<SubscribeRequest, Error = futures_mpsc::SendError> + Send>> = Box::pin(sender);
+                    let mut sender: Pin<Box<dyn futures_util::Sink<SubscribeRequest, Error = SubscribeRequestSinkError> + Send>> = Box::pin(sender);
                     // Ensure the boxed stream yields Result<_, tonic::Status>
                     let mut stream: Pin<Box<dyn Stream<Item = Result<SubscribeUpdate, tonic::Status>> + Send>> =
                         Box::pin(stream.map_err(|ystatus| {
@@ -258,7 +259,7 @@ async fn connect_and_subscribe_once(
     api_key: String,
 ) -> Result<
     (
-        impl futures_util::Sink<SubscribeRequest, Error = futures_mpsc::SendError> + Send,
+        impl futures_util::Sink<SubscribeRequest, Error = SubscribeRequestSinkError> + Send,
         impl Stream<Item = Result<SubscribeUpdate, yellowstone_grpc_proto::tonic::Status>> + Send,
     ),
     tonic::Status,

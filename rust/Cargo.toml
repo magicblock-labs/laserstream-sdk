@@ -1,6 +1,6 @@
 [package]
 name = "helius-laserstream"
-version = "0.1.2"
+version = "0.2.2"
 edition = "2021"
 authors = ["Helius <support@helius.xyz>"]
 description = "Rust client for Helius LaserStream gRPC with robust reconnection and slot tracking"
@@ -11,50 +11,22 @@ readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+# Yellowstone 12.x/13.x line: tonic 0.14 / prost 0.14 / solana 4.x, matching the
+# magicblock validator workspace (agave 4.0). Only the dependencies the library
+# itself uses are declared; the integration-test bins (which needed reqwest/sha2/
+# bs58/serde_json) were dropped along with their deps to keep the validator's
+# dependency graph free of duplicate (older) versions.
 [dependencies]
-yellowstone-grpc-proto = "7.0.0"
-yellowstone-grpc-client = "7.0.0"
-tonic = { version = "0.12.1", features = ["transport", "tls", "zstd", "gzip"] }
-prost = "0.12"
-prost-types = "0.12"
-tokio = { version = "1", features = [
-  "rt-multi-thread",
-  "macros",
-  "time",
-  "sync",
-] }
-tokio-stream = "0.1"
-bs58 = "0.5"
-thiserror = "1.0"
+yellowstone-grpc-proto = "12.5"
+yellowstone-grpc-client = "13.1"
+tonic = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+thiserror = "2"
 futures-util = { version = "0.3", features = ["sink"] }
 futures-channel = "0.3"
 futures = "0.3"
 async-stream = "0.3"
-rand = "0.8"
 url = "2.5"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-uuid = { version = "1.7.0", features = ["v4"] }
-chrono = { version = "0.4", features = ["serde", "clock"] }
-reqwest = { version = "0.11", features = ["json", "gzip", "rustls-tls"] }
-sha2 = "0.10"
-
-[dev-dependencies]
-dotenv = "0.15"
-
-[build-dependencies]
-tonic-build = "0.10.2"
-
-[[bin]]
-name = "account_integrity_test"
-path = "test/account_integrity.rs"
-
-[[bin]]
-name = "transaction_integrity_test"
-path = "test/transaction_integrity.rs"
-
-[[bin]]
-name = "block_integrity_test"
-path = "test/block_integrity.rs"
+uuid = { version = "1", features = ["v4"] }
