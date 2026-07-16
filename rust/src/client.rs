@@ -10,9 +10,7 @@ use tokio::time::sleep;
 use tonic::Status;
 use tracing::{error, instrument, warn};
 use uuid;
-use yellowstone_grpc_client::{
-    ClientTlsConfig, GeyserGrpcClient, SubscribeRequestSinkError,
-};
+use yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcClient, SubscribeRequestSinkError};
 use yellowstone_grpc_proto::geyser::{
     subscribe_update::UpdateOneof, SubscribeRequest, SubscribeRequestFilterSlots,
     SubscribeRequestPing, SubscribeUpdate,
@@ -99,6 +97,15 @@ pub fn subscribe(
         let api_key_string = config.api_key.clone();
 
         loop {
+            // Include writes queued while the stream was reconnecting in the
+            // next subscription request.
+            while let Ok(write_request) = write_rx.try_recv() {
+                merge_subscribe_requests(
+                    &mut current_request,
+                    &write_request,
+                    &internal_slot_sub_id,
+                );
+            }
 
             let mut attempt_request = current_request.clone();
 
@@ -120,9 +127,6 @@ pub fn subscribe(
 
             match connect_and_subscribe_once(&config, attempt_request, api_key_string.clone()).await {
                 Ok((sender, stream)) => {
-                    // Successful connection – reset attempt counter so we don't hit the cap
-                    reconnect_attempts = 0;
-
                     // Box sender and stream here before processing
                     let mut sender: Pin<Box<dyn futures_util::Sink<SubscribeRequest, Error = SubscribeRequestSinkError> + Send>> = Box::pin(sender);
                     // Ensure the boxed stream yields Result<_, tonic::Status>
@@ -159,6 +163,10 @@ pub fn subscribe(
                                 if let Some(result) = result {
                                     match result {
                                         Ok(update) => {
+                                            // A connection only counts as recovered once it
+                                            // actually delivers stream data. Otherwise repeated
+                                            // connect-then-fail loops must exhaust the retry budget.
+                                            reconnect_attempts = 0;
 
                                             // Handle ping/pong
                                             if matches!(&update.update_oneof, Some(UpdateOneof::Ping(_))) {
@@ -216,7 +224,20 @@ pub fn subscribe(
 
                             // Handle write requests from the user
                             Some(write_request) = write_rx.recv() => {
-                                if let Err(e) = sender.send(write_request).await {
+                                merge_subscribe_requests(
+                                    &mut current_request,
+                                    &write_request,
+                                    &internal_slot_sub_id,
+                                );
+
+                                // Yellowstone replaces the full subscription
+                                // on write, so retain the SDK's internal slot
+                                // tracker in the request sent to the server.
+                                let mut send_request = current_request.clone();
+                                send_request.from_slot = None;
+                                send_request.ping = None;
+
+                                if let Err(e) = sender.send(send_request).await {
                                     warn!(error = %e, "Failed to send write request");
                                     break;
                                 }
@@ -250,6 +271,34 @@ pub fn subscribe(
     };
 
     (update_stream, handle)
+}
+
+/// Replaces the retained user subscription with a `write()` request while
+/// preserving connection-specific replay state.
+fn merge_subscribe_requests(
+    current: &mut SubscribeRequest,
+    replacement: &SubscribeRequest,
+    internal_slot_sub_id: &str,
+) {
+    let internal_slot_tracker = current.slots.get(internal_slot_sub_id).cloned();
+
+    current.accounts = replacement.accounts.clone();
+    current.slots = replacement.slots.clone();
+    current.transactions = replacement.transactions.clone();
+    current.transactions_status = replacement.transactions_status.clone();
+    current.blocks = replacement.blocks.clone();
+    current.blocks_meta = replacement.blocks_meta.clone();
+    current.entry = replacement.entry.clone();
+    current.accounts_data_slice = replacement.accounts_data_slice.clone();
+
+    if let Some(filter) = internal_slot_tracker {
+        current
+            .slots
+            .insert(internal_slot_sub_id.to_string(), filter);
+    }
+    if replacement.commitment.is_some() {
+        current.commitment = replacement.commitment;
+    }
 }
 
 #[instrument(skip(config, request, api_key))]
@@ -332,4 +381,57 @@ async fn connect_and_subscribe_once(
         .map_err(|e| tonic::Status::internal(format!("Subscription failed: {}", e)))?;
 
     Ok((sender, stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use yellowstone_grpc_proto::geyser::SubscribeRequestFilterAccounts;
+
+    use super::*;
+
+    #[test]
+    fn write_replaces_subscription_and_preserves_replay_state() {
+        let internal_slot_sub_id = "internal-test";
+        let mut current = SubscribeRequest {
+            accounts: HashMap::from([(
+                "old".to_string(),
+                SubscribeRequestFilterAccounts::default(),
+            )]),
+            slots: HashMap::from([(
+                internal_slot_sub_id.to_string(),
+                SubscribeRequestFilterSlots {
+                    filter_by_commitment: Some(true),
+                    ..Default::default()
+                },
+            )]),
+            commitment: Some(0),
+            from_slot: Some(123),
+            ping: Some(SubscribeRequestPing { id: 7 }),
+            ..Default::default()
+        };
+        let replacement = SubscribeRequest {
+            accounts: HashMap::from([(
+                "new".to_string(),
+                SubscribeRequestFilterAccounts::default(),
+            )]),
+            slots: HashMap::from([("caller".to_string(), SubscribeRequestFilterSlots::default())]),
+            commitment: Some(1),
+            from_slot: Some(999),
+            ping: Some(SubscribeRequestPing { id: 9 }),
+            ..Default::default()
+        };
+
+        merge_subscribe_requests(&mut current, &replacement, internal_slot_sub_id);
+
+        assert_eq!(current.accounts.len(), 1);
+        assert!(current.accounts.contains_key("new"));
+        assert_eq!(current.slots.len(), 2);
+        assert!(current.slots.contains_key("caller"));
+        assert!(current.slots.contains_key(internal_slot_sub_id));
+        assert_eq!(current.commitment, Some(1));
+        assert_eq!(current.from_slot, Some(123));
+        assert_eq!(current.ping.as_ref().map(|ping| ping.id), Some(7));
+    }
 }
