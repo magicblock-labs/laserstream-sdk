@@ -162,8 +162,11 @@ pub fn subscribe(
 
             match connect_and_subscribe_once(&config, attempt_request, api_key_string.clone()).await {
                 Ok((sender, stream)) => {
-                    // Successful connection – reset attempt counter so we don't hit the cap
-                    reconnect_attempts = 0;
+                    // Do NOT reset the attempt counter yet: a connection only
+                    // counts as recovered once it delivers subscription data.
+                    // Otherwise repeated connect-then-fail loops never exhaust
+                    // the retry budget and a dead stream reconnects silently
+                    // forever instead of surfacing a terminal error.
 
                     // Box sender and stream here before processing
                     let mut sender: Pin<Box<dyn futures_util::Sink<SubscribeRequest, Error = futures_mpsc::SendError> + Send>> = Box::pin(sender);
@@ -196,7 +199,6 @@ pub fn subscribe(
                                 if let Some(result) = result {
                                     match result {
                                         Ok(update) => {
-
                                             // Handle ping/pong
                                             if matches!(&update.update_oneof, Some(UpdateOneof::Ping(_))) {
                                                 let pong_req = SubscribeRequest { ping: Some(SubscribeRequestPing { id: 1 }), ..Default::default() };
@@ -231,10 +233,14 @@ pub fn subscribe(
 
                                                 // Only yield if there are still filters after cleaning
                                                 if !clean_update.filters.is_empty() {
+                                                    // Internal slot/ping traffic is not proof that
+                                                    // the requested subscription recovered.
+                                                    reconnect_attempts = 0;
                                                     yield Ok(clean_update);
                                                 }
                                             } else {
                                                 // When replay is disabled, yield all updates as-is
+                                                reconnect_attempts = 0;
                                                 yield Ok(clean_update);
                                             }
                                         }
