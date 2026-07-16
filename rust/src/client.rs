@@ -233,9 +233,10 @@ pub fn subscribe(
                                 // Yellowstone replaces the full subscription
                                 // on write, so retain the SDK's internal slot
                                 // tracker in the request sent to the server.
-                                let mut send_request = current_request.clone();
-                                send_request.from_slot = None;
-                                send_request.ping = None;
+                                let send_request = live_write_request(
+                                    &current_request,
+                                    &write_request,
+                                );
 
                                 if let Err(e) = sender.send(send_request).await {
                                     warn!(error = %e, "Failed to send write request");
@@ -299,6 +300,18 @@ fn merge_subscribe_requests(
     if replacement.commitment.is_some() {
         current.commitment = replacement.commitment;
     }
+}
+
+/// Builds the live replacement request with its activation slot while keeping
+/// the retained replay request free of connection-specific fields.
+fn live_write_request(
+    current: &SubscribeRequest,
+    replacement: &SubscribeRequest,
+) -> SubscribeRequest {
+    let mut request = current.clone();
+    request.from_slot = replacement.from_slot;
+    request.ping = None;
+    request
 }
 
 #[instrument(skip(config, request, api_key))]
@@ -424,6 +437,7 @@ mod tests {
         };
 
         merge_subscribe_requests(&mut current, &replacement, internal_slot_sub_id);
+        let live_request = live_write_request(&current, &replacement);
 
         assert_eq!(current.accounts.len(), 1);
         assert!(current.accounts.contains_key("new"));
@@ -433,5 +447,8 @@ mod tests {
         assert_eq!(current.commitment, Some(1));
         assert_eq!(current.from_slot, Some(123));
         assert_eq!(current.ping.as_ref().map(|ping| ping.id), Some(7));
+        assert_eq!(live_request.from_slot, Some(999));
+        assert!(live_request.ping.is_none());
+        assert!(live_request.slots.contains_key(internal_slot_sub_id));
     }
 }
