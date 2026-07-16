@@ -256,13 +256,15 @@ pub fn subscribe(
                                 // Merge the write_request into current_request so it persists across reconnections
                                 merge_subscribe_requests(&mut current_request, &write_request, &internal_slot_sub_id);
 
-                                // Send the merged current_request (which preserves the internal slot
-                                // tracker) instead of the raw write_request. Yellowstone gRPC replaces
-                                // all subscriptions on each write, so the raw request would drop the
-                                // internal slot tracker and cause tracked_slot to go stale.
-                                let mut send_req = current_request.clone();
-                                send_req.from_slot = None;
-                                send_req.ping = None;
+                                // Yellowstone replaces the full subscription
+                                // on write, so send the merged current_request
+                                // (which preserves the internal slot tracker)
+                                // instead of the raw write_request, while
+                                // keeping the write's activation slot.
+                                let send_req = live_write_request(
+                                    &current_request,
+                                    &write_request,
+                                );
 
                                 if let Err(e) = sender.send(send_req).await {
                                     warn!(error = %e, "Failed to send write request");
@@ -301,6 +303,18 @@ pub fn subscribe(
     };
 
     (update_stream, handle)
+}
+
+/// Builds the live replacement request with its activation slot while keeping
+/// the retained replay request free of connection-specific fields.
+fn live_write_request(
+    current: &SubscribeRequest,
+    replacement: &SubscribeRequest,
+) -> SubscribeRequest {
+    let mut request = current.clone();
+    request.from_slot = replacement.from_slot;
+    request.ping = None;
+    request
 }
 
 #[instrument(skip(config, request, api_key))]
