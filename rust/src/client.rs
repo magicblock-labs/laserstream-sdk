@@ -163,11 +163,6 @@ pub fn subscribe(
                                 if let Some(result) = result {
                                     match result {
                                         Ok(update) => {
-                                            // A connection only counts as recovered once it
-                                            // actually delivers stream data. Otherwise repeated
-                                            // connect-then-fail loops must exhaust the retry budget.
-                                            reconnect_attempts = 0;
-
                                             // Handle ping/pong
                                             if matches!(&update.update_oneof, Some(UpdateOneof::Ping(_))) {
                                                 let pong_req = SubscribeRequest { ping: Some(SubscribeRequestPing { id: 1 }), ..Default::default() };
@@ -202,10 +197,14 @@ pub fn subscribe(
 
                                                 // Only yield if there are still filters after cleaning
                                                 if !clean_update.filters.is_empty() {
+                                                    // Internal slot/ping traffic is not proof that
+                                                    // the requested subscription recovered.
+                                                    reconnect_attempts = 0;
                                                     yield Ok(clean_update);
                                                 }
                                             } else {
                                                 // When replay is disabled, yield all updates as-is
+                                                reconnect_attempts = 0;
                                                 yield Ok(clean_update);
                                             }
                                         }
