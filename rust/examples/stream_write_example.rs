@@ -46,7 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = Box::pin(stream);
 
     let message_count = Arc::new(AtomicU32::new(0));
-    let handle_clone = handle.clone();
+    // Keep an owner outside the writer task: dropping the last handle closes the stream.
+    let handle = Arc::new(handle);
+    let write_handle = handle.clone();
     let count_clone = message_count.clone();
 
     // Spawn a task to add subscriptions dynamically
@@ -73,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         };
 
-        if let Err(e) = handle_clone.write(transaction_request).await {
+        if let Err(e) = write_handle.write(transaction_request).await {
             eprintln!("❌ Failed to add transaction subscription: {}", e);
         } else {
             println!("✅ Successfully added transaction subscription");
@@ -102,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         };
 
-        if let Err(e) = handle_clone.write(block_request).await {
+        if let Err(e) = write_handle.write(block_request).await {
             eprintln!("❌ Failed to add block subscription: {}", e);
         } else {
             println!("✅ Successfully added block subscription");

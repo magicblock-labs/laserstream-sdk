@@ -1,10 +1,12 @@
-use crate::{LaserstreamConfig, LaserstreamError, config::CompressionEncoding as ConfigCompressionEncoding};
+use crate::{
+    config::CompressionEncoding as ConfigCompressionEncoding, LaserstreamConfig, LaserstreamError,
+};
 use async_stream::stream;
 use futures::StreamExt;
 use futures_channel::mpsc as futures_mpsc;
 use futures_util::{sink::SinkExt, Stream};
 use std::{pin::Pin, time::Duration};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 use laserstream_core_proto::tonic::{
     Status, Request, metadata::MetadataValue, transport::Endpoint, codec::CompressionEncoding,
@@ -59,9 +61,11 @@ impl Interceptor for SdkMetadataInterceptor {
 }
 
 /// Handle for managing a bidirectional streaming subscription.
-#[derive(Clone)]
+///
+/// Dropping the handle signals the background stream to shut down gracefully.
 pub struct StreamHandle {
     write_tx: mpsc::UnboundedSender<SubscribeRequest>,
+    close_tx: Option<watch::Sender<bool>>,
 }
 
 impl StreamHandle {
@@ -70,6 +74,14 @@ impl StreamHandle {
         self.write_tx
             .send(request)
             .map_err(|_| LaserstreamError::ConnectionError("Write channel closed".to_string()))
+    }
+}
+
+impl Drop for StreamHandle {
+    fn drop(&mut self) {
+        if let Some(tx) = self.close_tx.take() {
+            let _ = tx.send(true);
+        }
     }
 }
 
@@ -84,7 +96,11 @@ pub fn subscribe(
     StreamHandle,
 ) {
     let (write_tx, mut write_rx) = mpsc::unbounded_channel::<SubscribeRequest>();
-    let handle = StreamHandle { write_tx };
+    let (close_tx, mut close_rx) = watch::channel(false);
+    let handle = StreamHandle {
+        write_tx,
+        close_tx: Some(close_tx),
+    };
     let update_stream = stream! {
         let mut reconnect_attempts = 0;
         let mut tracked_slot: u64 = 0;
@@ -98,10 +114,10 @@ pub fn subscribe(
         // Keep original request for reconnection attempts
         let mut current_request = request.clone();
         let internal_slot_sub_id = format!("internal-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
-        
+
         // Get replay behavior from config
         let replay_enabled = config.replay;
-        
+
         // Add internal slot subscription only when replay is enabled
         if replay_enabled {
             current_request.slots.insert(
@@ -112,7 +128,7 @@ pub fn subscribe(
                 }
             );
         }
-        
+
         // Clear any user-provided from_slot if replay is disabled
         if !replay_enabled {
             current_request.from_slot = None;
@@ -146,8 +162,11 @@ pub fn subscribe(
 
             match connect_and_subscribe_once(&config, attempt_request, api_key_string.clone()).await {
                 Ok((sender, stream)) => {
-                    // Successful connection – reset attempt counter so we don't hit the cap
-                    reconnect_attempts = 0;
+                    // Do NOT reset the attempt counter yet: a connection only
+                    // counts as recovered once it delivers subscription data.
+                    // Otherwise repeated connect-then-fail loops never exhaust
+                    // the retry budget and a dead stream reconnects silently
+                    // forever instead of surfacing a terminal error.
 
                     // Box sender and stream here before processing
                     let mut sender: Pin<Box<dyn futures_util::Sink<SubscribeRequest, Error = futures_mpsc::SendError> + Send>> = Box::pin(sender);
@@ -161,6 +180,11 @@ pub fn subscribe(
 
                     loop {
                         tokio::select! {
+                            // Handle explicit close signal
+                            _ = close_rx.changed() => {
+                                return;
+                            }
+
                             // Send periodic ping
                             _ = ping_interval.tick() => {
                                 ping_id = ping_id.wrapping_add(1);
@@ -175,7 +199,6 @@ pub fn subscribe(
                                 if let Some(result) = result {
                                     match result {
                                         Ok(update) => {
-                                            
                                             // Handle ping/pong
                                             if matches!(&update.update_oneof, Some(UpdateOneof::Ping(_))) {
                                                 let pong_req = SubscribeRequest { ping: Some(SubscribeRequestPing { id: 1 }), ..Default::default() };
@@ -185,7 +208,7 @@ pub fn subscribe(
                                                 }
                                                 continue;
                                             }
-                                            
+
                                             // Do not forward server 'Pong' updates to consumers either
                                             if matches!(&update.update_oneof, Some(UpdateOneof::Pong(_))) {
                                                 continue;
@@ -196,7 +219,7 @@ pub fn subscribe(
                                     if replay_enabled {
                                         tracked_slot = s.slot;
                                     }
-                                    
+
                                     // Skip if this slot update is EXCLUSIVELY from our internal subscription
                                     if update.filters.len() == 1 && update.filters.contains(&internal_slot_sub_id) {
                                         continue;
@@ -207,13 +230,17 @@ pub fn subscribe(
                                             let mut clean_update = update;
                                             if replay_enabled {
                                                 clean_update.filters.retain(|f| f != &internal_slot_sub_id);
-                                                
+
                                                 // Only yield if there are still filters after cleaning
                                                 if !clean_update.filters.is_empty() {
+                                                    // Internal slot/ping traffic is not proof that
+                                                    // the requested subscription recovered.
+                                                    reconnect_attempts = 0;
                                                     yield Ok(clean_update);
                                                 }
                                             } else {
                                                 // When replay is disabled, yield all updates as-is
+                                                reconnect_attempts = 0;
                                                 yield Ok(clean_update);
                                             }
                                         }
@@ -229,19 +256,21 @@ pub fn subscribe(
                                     break;
                                 }
                             }
-                            
+
                             // Handle write requests from the user
                             Some(write_request) = write_rx.recv() => {
                                 // Merge the write_request into current_request so it persists across reconnections
                                 merge_subscribe_requests(&mut current_request, &write_request, &internal_slot_sub_id);
 
-                                // Send the merged current_request (which preserves the internal slot
-                                // tracker) instead of the raw write_request. Yellowstone gRPC replaces
-                                // all subscriptions on each write, so the raw request would drop the
-                                // internal slot tracker and cause tracked_slot to go stale.
-                                let mut send_req = current_request.clone();
-                                send_req.from_slot = None;
-                                send_req.ping = None;
+                                // Yellowstone replaces the full subscription
+                                // on write, so send the merged current_request
+                                // (which preserves the internal slot tracker)
+                                // instead of the raw write_request, while
+                                // keeping the write's activation slot.
+                                let send_req = live_write_request(
+                                    &current_request,
+                                    &write_request,
+                                );
 
                                 if let Err(e) = sender.send(send_req).await {
                                     warn!(error = %e, "Failed to send write request");
@@ -270,13 +299,28 @@ pub fn subscribe(
                 }
             }
 
-            // Wait 5s before retry
+            // Wait 5s before retry, but abort if close is signalled
             let delay = Duration::from_millis(FIXED_RECONNECT_INTERVAL_MS);
-            sleep(delay).await;
+            tokio::select! {
+                _ = sleep(delay) => {}
+                _ = close_rx.changed() => { return; }
+            }
         }
     };
-    
+
     (update_stream, handle)
+}
+
+/// Builds the live replacement request with its activation slot while keeping
+/// the retained replay request free of connection-specific fields.
+fn live_write_request(
+    current: &SubscribeRequest,
+    replacement: &SubscribeRequest,
+) -> SubscribeRequest {
+    let mut request = current.clone();
+    request.from_slot = replacement.from_slot;
+    request.ping = None;
+    request
 }
 
 #[instrument(skip(config, request, api_key))]
@@ -536,3 +580,64 @@ fn merge_subscribe_requests(
     // Note: from_slot and ping are not replaced as they are connection-specific
 }
 
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use laserstream_core_proto::geyser::SubscribeRequestFilterAccounts;
+
+    use super::*;
+
+    #[test]
+    fn write_replaces_subscription_and_preserves_replay_state() {
+        let internal_slot_sub_id = "internal-test";
+        let mut current = SubscribeRequest {
+            accounts: HashMap::from([(
+                "old".to_string(),
+                SubscribeRequestFilterAccounts::default(),
+            )]),
+            slots: HashMap::from([(
+                internal_slot_sub_id.to_string(),
+                SubscribeRequestFilterSlots {
+                    filter_by_commitment: Some(true),
+                    ..Default::default()
+                },
+            )]),
+            commitment: Some(0),
+            from_slot: Some(123),
+            ping: Some(SubscribeRequestPing { id: 7 }),
+            ..Default::default()
+        };
+        let replacement = SubscribeRequest {
+            accounts: HashMap::from([(
+                "new".to_string(),
+                SubscribeRequestFilterAccounts::default(),
+            )]),
+            slots: HashMap::from([("caller".to_string(), SubscribeRequestFilterSlots::default())]),
+            commitment: Some(1),
+            from_slot: Some(999),
+            ping: Some(SubscribeRequestPing { id: 9 }),
+            ..Default::default()
+        };
+
+        merge_subscribe_requests(&mut current, &replacement, internal_slot_sub_id);
+        let live_request = live_write_request(&current, &replacement);
+
+        // Retained replay request: latest subs + internal tracker, no
+        // connection-specific fields from the write.
+        assert_eq!(current.accounts.len(), 1);
+        assert!(current.accounts.contains_key("new"));
+        assert_eq!(current.slots.len(), 2);
+        assert!(current.slots.contains_key("caller"));
+        assert!(current.slots.contains_key(internal_slot_sub_id));
+        assert_eq!(current.commitment, Some(1));
+        assert_eq!(current.from_slot, Some(123));
+        assert_eq!(current.ping.as_ref().map(|ping| ping.id), Some(7));
+
+        // Live request keeps the write's activation slot and drops ping.
+        assert_eq!(live_request.from_slot, Some(999));
+        assert!(live_request.ping.is_none());
+        assert!(live_request.slots.contains_key(internal_slot_sub_id));
+    }
+}

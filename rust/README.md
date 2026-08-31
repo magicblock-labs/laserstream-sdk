@@ -305,7 +305,9 @@ use tokio::time::{sleep, Duration};
 let (stream, handle) = subscribe(config, initial_request);
 tokio::pin!(stream);
 
-// In another task or after some condition
+// Dropping the last handle closes the stream, so keep an owner
+// alive here and share it with the writer task via Arc.
+let handle = std::sync::Arc::new(handle);
 let write_handle = handle.clone();
 tokio::spawn(async move {
     sleep(Duration::from_secs(5)).await;
