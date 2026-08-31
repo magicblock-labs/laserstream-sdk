@@ -580,3 +580,64 @@ fn merge_subscribe_requests(
     // Note: from_slot and ping are not replaced as they are connection-specific
 }
 
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use laserstream_core_proto::geyser::SubscribeRequestFilterAccounts;
+
+    use super::*;
+
+    #[test]
+    fn write_replaces_subscription_and_preserves_replay_state() {
+        let internal_slot_sub_id = "internal-test";
+        let mut current = SubscribeRequest {
+            accounts: HashMap::from([(
+                "old".to_string(),
+                SubscribeRequestFilterAccounts::default(),
+            )]),
+            slots: HashMap::from([(
+                internal_slot_sub_id.to_string(),
+                SubscribeRequestFilterSlots {
+                    filter_by_commitment: Some(true),
+                    ..Default::default()
+                },
+            )]),
+            commitment: Some(0),
+            from_slot: Some(123),
+            ping: Some(SubscribeRequestPing { id: 7 }),
+            ..Default::default()
+        };
+        let replacement = SubscribeRequest {
+            accounts: HashMap::from([(
+                "new".to_string(),
+                SubscribeRequestFilterAccounts::default(),
+            )]),
+            slots: HashMap::from([("caller".to_string(), SubscribeRequestFilterSlots::default())]),
+            commitment: Some(1),
+            from_slot: Some(999),
+            ping: Some(SubscribeRequestPing { id: 9 }),
+            ..Default::default()
+        };
+
+        merge_subscribe_requests(&mut current, &replacement, internal_slot_sub_id);
+        let live_request = live_write_request(&current, &replacement);
+
+        // Retained replay request: latest subs + internal tracker, no
+        // connection-specific fields from the write.
+        assert_eq!(current.accounts.len(), 1);
+        assert!(current.accounts.contains_key("new"));
+        assert_eq!(current.slots.len(), 2);
+        assert!(current.slots.contains_key("caller"));
+        assert!(current.slots.contains_key(internal_slot_sub_id));
+        assert_eq!(current.commitment, Some(1));
+        assert_eq!(current.from_slot, Some(123));
+        assert_eq!(current.ping.as_ref().map(|ping| ping.id), Some(7));
+
+        // Live request keeps the write's activation slot and drops ping.
+        assert_eq!(live_request.from_slot, Some(999));
+        assert!(live_request.ping.is_none());
+        assert!(live_request.slots.contains_key(internal_slot_sub_id));
+    }
+}

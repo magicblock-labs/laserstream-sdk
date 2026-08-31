@@ -89,6 +89,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (stream, handle) = subscribe(config, initial_request);
     let mut stream = Box::pin(stream);
 
+    // StreamHandle is not Clone (dropping it closes the stream); share it.
+    let handle = std::sync::Arc::new(handle);
     let handle_clone = handle.clone();
     let write_time_setter = write_completed_time.clone();
     let ready_flag = ready_for_write.clone();
